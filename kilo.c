@@ -15,9 +15,21 @@
 
 #define CTRL_KEY(k) ((k) & 0x1f) //Sets 3 upper bits to 0, mirrors Ctrl
 
+enum editorKey{
+    ARROW_UP = 1000,
+    ARROW_DOWN,
+    ARROW_LEFT,
+    ARROW_RIGHT,
+    HOME_KEY,
+    END_KEY,
+    PAGE_UP,
+    PAGE_DOWN
+};
+
 /*** data ***/
 
 struct editorConfig {
+    int cx, cy; //cursor position
     int screenrows;
     int screencols;
     struct termios orig_termios; //To keep track of initial terminal attributes
@@ -65,14 +77,66 @@ void enableRawMode(){
 }
 
 /*Waits for keypress and returns it*/
-char editorReadKey(){
+int editorReadKey(){
     int nread;
     char c;
     while((nread = read(STDIN_FILENO, &c, 1)) != 1){ //We expect 1-byte reads
         //EAGAIN often raised when "there is no data now, try again later"
         if(nread == -1 && errno != EAGAIN) die("read: Error on read");
     }
-    return c;
+
+    /*
+    If we read an escape character, we read two more bytes and store in seq
+    If timeout, assume esc-press
+    If arrow key was pressed return corresponding wsad keypress
+    */
+    if(c == '\x1b'){
+        char seq[3];
+
+        if(read(STDIN_FILENO, &seq[0], 1) != 1) return '\x1b';
+        if(read(STDIN_FILENO, &seq[1], 1) != 1) return '\x1b';
+
+        /*
+        Try to read escape sequence
+        If second read byte is a ~ we read another byte expecting it to be a number
+        In that case return corresponding keypress
+        If second byte read is not a digit, parse it
+        Home and End key can be many different escape sequences depending on OS
+        */
+        if(seq[0] == '['){
+            if(seq[1] >= '0' && seq[1] <= '9'){
+                if(read(STDIN_FILENO, &seq[2], 1) != 1) return '\x1b';
+                if(seq[2] == '~'){
+                    switch(seq[1]){
+                        case '1': return HOME_KEY;
+                        case '4': return END_KEY;
+                        case '5': return PAGE_UP;
+                        case '6': return PAGE_DOWN;
+                        case '7': return HOME_KEY;
+                        case '8': return END_KEY;
+                    }
+                }
+            } else {
+                switch(seq[1]){
+                    case 'A': return ARROW_UP;
+                    case 'B': return ARROW_DOWN;
+                    case 'C': return ARROW_RIGHT;
+                    case 'D': return ARROW_LEFT;
+                    case 'H': return HOME_KEY;
+                    case 'F': return END_KEY;
+                }
+            }
+        } else if(seq[0] == '0'){
+            switch(seq[1]){
+                case 'H': return HOME_KEY;
+                case 'F': return END_KEY;
+            }
+        }
+
+        return '\x1b';
+    } else {
+        return c;
+    }
 }
 
 /*
@@ -174,7 +238,13 @@ void editorRefreshScreen(){
 
     editorDrawRows(&ab);
 
-    abAppend(&ab, "\x1b[H", 3);
+    //Mouse position
+    //snprintf prints a string of specific size in specific format
+    char buf[32];
+    snprintf(buf, sizeof(buf), "\x1b[%d;%dH", E.cy + 1, E.cx +1); //terminal uses 1-indexing
+    abAppend(&ab, buf, strlen(buf));
+
+    //abAppend(&ab, "\x1b[H", 3);
     abAppend(&ab, "\x1b[?25h", 6);
     
     write(STDOUT_FILENO, ab.b, ab.len);
@@ -182,14 +252,58 @@ void editorRefreshScreen(){
 }
 
 /*** input ***/
+void editorMoveCursor(int key){
+    switch(key){
+        case ARROW_UP:
+            if(E.cy > 0)
+                E.cy--;
+            break;
+        case ARROW_DOWN:
+            if(E.cy < E.screenrows - 1)
+                E.cy++;
+            break;
+        case ARROW_LEFT:
+            if(E.cx > 0)
+                E.cx--;
+            break;        
+        case ARROW_RIGHT:
+            if(E.cx < E.screencols - 1)
+                E.cx++;
+            break;    
+    }
+}
+
 void editorProcessKeypress(){
-    char c = editorReadKey();
+    int c = editorReadKey();
 
     switch(c) {
         case CTRL_KEY('q'):
             write(STDOUT_FILENO, "\x1b[2J", 4);
             write(STDOUT_FILENO, "\x1b[H", 3);
             exit(0);
+            break;
+
+        case HOME_KEY:
+            E.cx = 0;
+            break;
+
+        case END_KEY:
+            E.cx = E.screencols - 1;
+            break;
+
+        case PAGE_UP: 
+        case PAGE_DOWN:
+        {
+            int times = E.screenrows;
+            while(times--)
+                editorMoveCursor(c == PAGE_UP ? ARROW_UP : ARROW_DOWN);
+        }
+        break;
+        case ARROW_UP:
+        case ARROW_DOWN:
+        case ARROW_LEFT:
+        case ARROW_RIGHT:
+            editorMoveCursor(c);
             break;
     }
 }
@@ -199,6 +313,9 @@ void editorProcessKeypress(){
 
 /*Initializes the fields in the struct E*/
 void initEditor(){
+    E.cx = 0;
+    E.cy = 0;
+
     if (getWindowSize(&E.screenrows, &E.screencols) == -1) die("getWindowSize: Error on retrieving window size");
 }
 
